@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	postgresEvidenceImage  = "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"
-	redisEvidenceImage     = "redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2"
+	postgresEvidenceImage  = "postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
+	redisEvidenceImage     = "redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
 	toxiproxyEvidenceImage = "ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e"
 )
 
@@ -93,8 +93,8 @@ func TestOpenAPIValidatorIsLockedAndInstalledOffline(t *testing.T) {
 	if err := json.Unmarshal([]byte(readContractFile(t, filepath.Join(root, "web", "package.json"))), &packageManifest); err != nil {
 		t.Fatal(err)
 	}
-	if got := packageManifest.DevDependencies["@redocly/cli"]; got != "2.51.2" {
-		t.Fatalf("package.json @redocly/cli version = %q, want exact version 2.51.2", got)
+	if got := packageManifest.DevDependencies["@redocly/cli"]; got != "2.64.0" {
+		t.Fatalf("package.json @redocly/cli version = %q, want exact version 2.64.0", got)
 	}
 
 	var packageLock struct {
@@ -108,11 +108,11 @@ func TestOpenAPIValidatorIsLockedAndInstalledOffline(t *testing.T) {
 	if err := json.Unmarshal([]byte(readContractFile(t, filepath.Join(root, "web", "package-lock.json"))), &packageLock); err != nil {
 		t.Fatal(err)
 	}
-	if got := packageLock.Packages[""].DevDependencies["@redocly/cli"]; got != "2.51.2" {
-		t.Fatalf("package-lock root @redocly/cli version = %q, want exact version 2.51.2", got)
+	if got := packageLock.Packages[""].DevDependencies["@redocly/cli"]; got != "2.64.0" {
+		t.Fatalf("package-lock root @redocly/cli version = %q, want exact version 2.64.0", got)
 	}
 	lockedCLI := packageLock.Packages["node_modules/@redocly/cli"]
-	if lockedCLI.Version != "2.51.2" || lockedCLI.Resolved == "" || lockedCLI.Integrity == "" {
+	if lockedCLI.Version != "2.64.0" || lockedCLI.Resolved == "" || lockedCLI.Integrity == "" {
 		t.Fatalf("package-lock @redocly/cli entry is incomplete: version=%q resolved=%t integrity=%t", lockedCLI.Version, lockedCLI.Resolved != "", lockedCLI.Integrity != "")
 	}
 }
@@ -120,8 +120,10 @@ func TestOpenAPIValidatorIsLockedAndInstalledOffline(t *testing.T) {
 func TestSecretHistoryExceptionsAreExactReviewedFingerprints(t *testing.T) {
 	root := repositoryRoot(t)
 	content := readContractFile(t, filepath.Join(root, ".gitleaksignore"))
-	fingerprintPattern := regexp.MustCompile(`^[0-9a-f]{40}:(?:internal|tests|docs)/[^:]+:generic-api-key:[1-9][0-9]*$`)
-	fingerprints := make([]string, 0, 12)
+	fingerprintPattern := regexp.MustCompile(`^[0-9a-f]{40}:(?:(?:internal|tests|docs)/[^:]+|contracts/generated/(?:sdk-manifest\.json|go/ledgersync\.go|typescript/ledgersync\.ts)):generic-api-key:[1-9][0-9]*$`)
+	// 66 earlier findings plus 39 reviewed test-evidence identifiers in the PR #23 squash.
+	fingerprints := make([]string, 0, 105)
+	seen := make(map[string]bool, 105)
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -130,10 +132,14 @@ func TestSecretHistoryExceptionsAreExactReviewedFingerprints(t *testing.T) {
 		if !fingerprintPattern.MatchString(line) {
 			t.Fatalf("secret-history exception is broader than one exact finding fingerprint: %q", line)
 		}
+		if seen[line] {
+			t.Fatalf("duplicate secret-history fingerprint: %q", line)
+		}
+		seen[line] = true
 		fingerprints = append(fingerprints, line)
 	}
-	if len(fingerprints) != 12 {
-		t.Fatalf("reviewed secret-history exception count = %d, want exactly 12", len(fingerprints))
+	if len(fingerprints) != 105 {
+		t.Fatalf("reviewed secret-history exception count = %d, want exactly 105", len(fingerprints))
 	}
 	if strings.Contains(content, "allowlist") || strings.Contains(content, "regex") || strings.Contains(content, "path =") {
 		t.Fatal("secret-history exceptions must not introduce rule-, regex-, or path-wide allowlisting")

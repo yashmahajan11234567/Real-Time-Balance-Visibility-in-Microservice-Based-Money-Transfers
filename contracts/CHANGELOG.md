@@ -1,5 +1,50 @@
 # LedgerSync API changelog
 
+## 3.9.0 — 2026-10-16
+
+- Add bounded internal full-value reservations, immutable original command receipts and separately authorized current-state reads.
+- Add a separately audited reservation-obligation CSV from one database snapshot. Require transfer-read and export scopes; refuse overflow instead of truncation.
+- Capture uses the controlled transfer boundary. Release and fenced worker expiry preserve posted money. A denied capture retains its reservation and original result.
+- New transfer receipts distinguish posted, available and reserved minor units. Historical saved receipts remain unchanged and imply zero reserved funds.
+- Balance-event version 2 carries exact posted, reserved and available values. Historical version 1 remains readable. Compatible rollback must retain reservation and version-2 support.
+
+## 3.8.0 — 2026-10-16
+
+- Add bounded synthetic CSV statement preview, immutable import, fixed rule-v1 ledger snapshot, exact matching and audited optimistic review.
+- Preserve one INR clearing mapping and original source digest. Retain original keys and full intent after uncertain responses.
+- Add protected source download and formula-safe comparison export with both reconciliation and export scopes.
+- Keep all statement operations outside the financial writer; no journal adjustment or external settlement claim.
+
+## 3.7.0 — 2026-10-15
+
+- Document existing own-principal trusted backend authentication and mandatory fresh assertions for delegating workloads.
+- Preserve the configured `/api` prefix in the generated TypeScript client. Bound timeouts and reject paths that escape that API base.
+- Support a per-call assertion factory and omit assertions for own-principal workloads. Keep browser workloads behind the BFF.
+- Document the optional study route gate. Financial posting and event contracts stay compatible.
+
+## 3.6.0 — 2026-10-15
+
+- Add an optional opaque origin trace ID to authorized event details.
+- Keep historical records valid when no trace exists.
+- Preserve financial outcomes, event payloads, Lamport order and record permissions.
+- Keep trace viewer authorization separate from financial evidence.
+
+## 3.5.0 — 2026-10-12
+
+- Add optional Lamport origin metadata to authorized event details.
+- Add bounded publication attempts and message receipt evidence.
+- Preserve older envelopes, exact counters, tenant authorization, and event identity.
+- Keep event order separate from financial posting and cache aggregate versions.
+
+## 3.4.0 — 2026-10-10
+
+- Added immutable confirmed transfer preparation, a bounded original-user inbox,
+  and an empty-body server reconstruction retry for browser data loss.
+- Original financial keys remain private. Discovery uses current tenant, actor,
+  and account authority. Recovery creates no automatic movement or reservation.
+- Reused existing atomic posting, original outcome replay, rate limits, and
+  consistency metadata. Known receipts are read without a financial command.
+
 ## 3.3.0 — 2026-09-01
 
 - Added an audited, bounded investigation evidence bundle download requiring

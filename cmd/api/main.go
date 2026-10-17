@@ -20,6 +20,7 @@ import (
 	cacheplatform "github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/cache"
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/config"
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/db"
+	eventplatform "github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/events"
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/identity"
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/observability"
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/platform/redisconn"
@@ -37,7 +38,7 @@ func main() {
 		slog.Error("configuration invalid", "error", err)
 		os.Exit(1)
 	}
-	telemetry, err := observability.NewTelemetry(context.Background(), observability.TelemetryConfig{Enabled: configuration.TelemetryEnabled, ServiceName: configuration.TelemetryServiceName, Endpoint: configuration.OTLPHTTPEndpoint})
+	telemetry, err := observability.NewTelemetry(context.Background(), observability.TelemetryConfig{Enabled: configuration.TelemetryEnabled, ServiceName: configuration.TelemetryServiceName, Endpoint: configuration.OTLPHTTPEndpoint, CAFile: configuration.OTLPCAFile})
 	if err != nil {
 		slog.Error("telemetry initialization failed", "error", err)
 		os.Exit(1)
@@ -58,7 +59,7 @@ func main() {
 	router := http.NewServeMux()
 	if configuration.DatabaseURL != "" {
 		database, err := startup.Open(startupContext, "postgresql", startupConfig, func(ctx context.Context) (*sql.DB, error) {
-			return db.OpenPool(ctx, db.PoolConfig{DriverName: "pgx", DSN: configuration.DatabaseURL})
+			return db.OpenPool(ctx, db.PoolConfig{DriverName: "pgx", DSN: configuration.DatabaseURL, MaxOpenConns: configuration.DatabaseMaxOpenConns, ApplicationName: configuration.NodeIdentity("api")})
 		})
 		if err != nil {
 			slog.Error("database initialization failed", "error", err)
@@ -69,7 +70,17 @@ func main() {
 				slog.Warn("database close failed", "error", closeErr)
 			}
 		}()
-		readiness = database.Ping
+		readiness = func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			return database.PingContext(ctx)
+		}
+		stopPoolMetrics, metricsErr := telemetry.RegisterDatabasePool("api", database.Stats)
+		if metricsErr != nil {
+			slog.Error("database telemetry registration failed")
+			os.Exit(1)
+		}
+		defer stopPoolMetrics()
 		if configuration.Environment != "development" {
 			if err := db.ValidatePilotCurrency(context.Background(), database, configuration.PilotCurrency); err != nil {
 				slog.Error("pilot currency validation failed", "error", err)
@@ -142,7 +153,7 @@ func main() {
 			repository.WithPilotCurrency(configuration.PilotCurrency)
 			var provider identity.Provider
 			if configuration.Environment == "development" {
-				provider = identity.DevelopmentProvider{SubjectID: configuration.DevelopmentSubjectID, TenantID: configuration.DevelopmentTenantID, Credential: configuration.DevelopmentAPIToken, Roles: []string{"tenant:operator"}, Scopes: []string{"accounts:read", "accounts:write", "transactions:read", "transfers:read", "transfers:write", "reconciliation:read", "reconciliation:write", "local:read", "local:write", "events:read", "investigation:read", "investigation:write", "developer:read", "credentials:read", "credentials:write", "webhooks:read", "webhooks:write", "webhooks:replay", "recovery:read", "exports:read", "explainability:read", "funding:read", "funding:write", "funding:approve", "corrections:read", "corrections:write", "corrections:approve", identity.BFFActorScope}}
+				provider = identity.DevelopmentProvider{SubjectID: configuration.DevelopmentSubjectID, TenantID: configuration.DevelopmentTenantID, Credential: configuration.DevelopmentAPIToken, Roles: []string{"tenant:operator"}, Scopes: []string{"accounts:read", "accounts:write", "transactions:read", "transfers:read", "transfers:write", "reconciliation:read", "reconciliation:write", "local:read", "local:write", "events:read", "investigation:read", "investigation:write", "investigation:collaborate", "developer:read", "credentials:read", "credentials:write", "webhooks:read", "webhooks:write", "webhooks:replay", "recovery:read", "exports:read", "explainability:read", "funding:read", "funding:write", "funding:approve", "corrections:read", "corrections:write", "corrections:approve", identity.BFFActorScope}}
 			} else {
 				provider, err = identity.NewOIDCProvider(context.Background(), identity.OIDCProviderConfig{
 					IssuerURL:        configuration.OIDCIssuerURL,
@@ -185,6 +196,7 @@ func main() {
 				os.Exit(1)
 			}
 			transferHandler := handlers.NewTransferHandler(service, provider, issuer).
+				WithRecoveryRepository(repository).
 				WithConsistencyBalanceReader(balanceRepository).
 				WithCommittedResponseObserver(telemetry)
 			balanceHandler := handlers.NewBalanceHandler(balanceReader, provider)
@@ -211,6 +223,14 @@ func main() {
 				os.Exit(1)
 			}
 			investigationHandler := handlers.NewInvestigationHandler(investigationRepository, provider)
+			if configuration.LiveInvestigationEnabled {
+				liveSignals, signalErr := eventplatform.NewLiveInvestigationSignals(redisClient, configuration.LiveInvestigationNamespace)
+				if signalErr != nil {
+					slog.Error("live investigation signalling initialization failed", "error", signalErr)
+					os.Exit(1)
+				}
+				investigationHandler.WithLiveCollaboration(true, liveSignals)
+			}
 			rateLimiter, err := db.NewRateLimitRepository(database, nil)
 			if err != nil {
 				slog.Error("rate limiter initialization failed", "error", err)
@@ -281,6 +301,20 @@ func main() {
 				slog.Error("reconciliation command route initialization failed", "error", err)
 				os.Exit(1)
 			}
+			if err := registerStatementReconciliationRoutes(router, reconciliationCommandRouteConfig{
+				Database: database, Identity: provider, Authenticator: authenticator, RateLimiter: rateLimiter, AuditRecorder: auditRepository,
+				RateLimitPerMinute: configuration.WriteRateLimitPerMinute, CapacityLimitPerSecond: configuration.WriteCapacityPerSecond,
+			}); err != nil {
+				slog.Error("statement reconciliation route initialization failed", "error", err)
+				os.Exit(1)
+			}
+			if err := registerReservationRoutes(router, reconciliationCommandRouteConfig{
+				Database: database, Identity: provider, Authenticator: authenticator, RateLimiter: rateLimiter, AuditRecorder: auditRepository,
+				RateLimitPerMinute: configuration.WriteRateLimitPerMinute, CapacityLimitPerSecond: configuration.WriteCapacityPerSecond,
+			}); err != nil {
+				slog.Error("reservation route initialization failed", "error", err)
+				os.Exit(1)
+			}
 			if err := registerOperationsRoutes(router, operationsRouteConfig{
 				Database: database, Redis: redisClient, Environment: configuration.Environment, Identity: provider, Authenticator: authenticator,
 				RateLimiter: rateLimiter, AuditRecorder: auditRepository, RateLimitPerMinute: configuration.ReadRateLimitPerMinute,
@@ -289,6 +323,7 @@ func main() {
 				os.Exit(1)
 			}
 			if err := registerDeveloperRoutes(router, developerRouteConfig{
+				Database: database, StudyEnabled: configuration.SystemsLabEnabled,
 				Identity: provider, Authenticator: authenticator, RateLimiter: rateLimiter, AuditRecorder: auditRepository,
 				RateLimitPerMinute: configuration.ReadRateLimitPerMinute,
 			}); err != nil {
@@ -334,6 +369,9 @@ func main() {
 				os.Exit(1)
 			}
 			router.Handle("POST /api/transfers", transferHandler)
+			router.HandleFunc("POST /api/transfers/recovery", transferHandler.PrepareRecovery)
+			router.HandleFunc("GET /api/transfers/recovery", transferHandler.ListRecovery)
+			router.HandleFunc("POST /api/transfers/recovery/{requestReference}/retry", transferHandler.Recover)
 			router.Handle("GET /api/accounts/{accountID}/balance", balanceHandler)
 			router.Handle("GET /api/me/accounts", accountsHandler)
 			router.Handle("GET /api/accounts/{accountID}", accountsHandler)
@@ -353,6 +391,17 @@ func main() {
 			router.HandleFunc("POST /api/investigation/workspaces/{investigationId}/handoff", investigationHandler.HandoffWorkspace)
 			router.HandleFunc("POST /api/investigation/workspaces/{investigationId}/close", investigationHandler.CloseWorkspace)
 			router.HandleFunc("POST /api/investigation/workspaces/{investigationId}/reopen", investigationHandler.ReopenWorkspace)
+			router.HandleFunc("GET /private/transfer-requests/{requestReference}/status", investigationHandler.TransferRequestStatus)
+			router.HandleFunc("POST /private/investigation/live-rooms", investigationHandler.StartLiveRoom)
+			router.HandleFunc("POST /private/investigation/live-rooms/join", investigationHandler.JoinLiveRoom)
+			router.HandleFunc("GET /private/investigation/live-rooms/{roomId}", investigationHandler.LiveRoom)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/invite", investigationHandler.IssueLiveRoomInvite)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/leave", investigationHandler.LeaveLiveRoom)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/end", investigationHandler.EndLiveRoom)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/finding", investigationHandler.RecordLiveRoomFinding)
+			router.HandleFunc("GET /private/investigation/live-rooms/{roomId}/signals", investigationHandler.LiveRoomSignals)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/signals", investigationHandler.LiveRoomSignals)
+			router.HandleFunc("POST /private/investigation/live-rooms/{roomId}/presence", investigationHandler.LiveRoomPresence)
 			router.HandleFunc("GET /api/reconciliation/runs", investigationHandler.ReconciliationRuns)
 			router.HandleFunc("GET /api/reconciliation/runs/{runID}", investigationHandler.ReconciliationRun)
 			router.HandleFunc("POST /api/funding-requests", fundingHandler.Request)
@@ -364,7 +413,21 @@ func main() {
 			router.HandleFunc("POST /api/funding-events/{fundingEventId}/compensations", fundingHandler.Compensate)
 			router.HandleFunc("GET /api/funding-events/{fundingEventId}/reconciliation", fundingHandler.Reconcile)
 			if cronSecret := configuration.CronSecret; cronSecret != "" {
-				workerRunner, runnerErr := bootstrap.NewWorkerRunner(startupContext, configuration, database, redisClient, telemetry)
+				workerDatabase, workerErr := startup.Open(startupContext, "cron-worker-postgresql", startupConfig, func(ctx context.Context) (*sql.DB, error) {
+					return db.OpenPool(ctx, db.PoolConfig{DriverName: "pgx", DSN: configuration.CronWorkerDatabaseURL, MaxOpenConns: configuration.DatabaseMaxOpenConns, ApplicationName: configuration.NodeIdentity("cron-worker")})
+				})
+				if workerErr != nil {
+					slog.Error("cron worker database initialization failed")
+					os.Exit(1)
+				}
+				defer func() { _ = workerDatabase.Close() }()
+				stopWorkerMetrics, metricsErr := telemetry.RegisterDatabasePool("cron_worker", workerDatabase.Stats)
+				if metricsErr != nil {
+					slog.Error("cron worker telemetry registration failed")
+					os.Exit(1)
+				}
+				defer stopWorkerMetrics()
+				workerRunner, runnerErr := bootstrap.NewCronWorkerRunner(startupContext, configuration, workerDatabase, redisClient, telemetry)
 				if runnerErr != nil {
 					slog.Error("cron worker initialization failed", "error", runnerErr)
 					os.Exit(1)
@@ -374,7 +437,11 @@ func main() {
 		}
 	}
 	router.Handle("/", httptransport.NewHealthHandler(readiness))
-	identifierAwareRouter := httptransport.WithIdentifierObserver(router, telemetry)
+	nodeRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-LedgerSync-Node", configuration.NodeIdentity("api"))
+		router.ServeHTTP(w, r)
+	})
+	identifierAwareRouter := httptransport.WithIdentifierObserver(nodeRouter, telemetry)
 	handler := middleware.Correlation(middleware.Contract(configuration.Environment, telemetry.HTTP(identifierAwareRouter)))
 	server := &http.Server{
 		Addr: configuration.HTTPAddress, Handler: handler,

@@ -25,7 +25,7 @@ func main() {
 	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	telemetry, err := observability.NewTelemetry(ctx, observability.TelemetryConfig{Enabled: os.Getenv("LEDGERSYNC_TELEMETRY_ENABLED") == "true", ServiceName: os.Getenv("LEDGERSYNC_TELEMETRY_SERVICE_NAME"), Endpoint: os.Getenv("LEDGERSYNC_OTLP_HTTP_ENDPOINT")})
+	telemetry, err := observability.NewTelemetry(ctx, observability.TelemetryConfig{Enabled: os.Getenv("LEDGERSYNC_TELEMETRY_ENABLED") == "true", ServiceName: os.Getenv("LEDGERSYNC_TELEMETRY_SERVICE_NAME"), Endpoint: os.Getenv("LEDGERSYNC_OTLP_HTTP_ENDPOINT"), CAFile: os.Getenv("LEDGERSYNC_OTLP_CA_FILE")})
 	if err != nil {
 		fail(err)
 	}
@@ -41,7 +41,7 @@ func main() {
 	}
 	switch *action {
 	case "inspect":
-		item, inspectErr := repository.Inspect(ctx, *tenant, *attempt)
+		item, inspectErr := repository.Inspect(ctx, *tenant, *actor, *attempt)
 		if inspectErr != nil {
 			fail(inspectErr)
 		}

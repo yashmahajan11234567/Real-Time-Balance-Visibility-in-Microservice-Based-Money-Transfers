@@ -48,7 +48,7 @@ test("create account preserves directory context and proves the zero-INR boundar
   expect(idempotencyKey.length).toBeGreaterThanOrEqual(16);
   await page.getByText("View account details", { exact: true }).click();
   await expect(page.getByText("Request reference").locator("..")) .toContainText("request-ref-1");
-  await expect(page.getByRole("link", { name: "Fund account" })).toHaveAttribute("href", new RegExp(`destination=${createdAccount.account_id}`));
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toHaveAttribute("href", new RegExp(`destination=${createdAccount.account_id}`));
 });
 
 test("unknown create result survives reload and retries the exact body and key", async ({ page }) => {
@@ -161,8 +161,8 @@ test("lifecycle confirmation is keyboard-modal, accessible, and 44px minimum", a
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();
   await page.getByRole("button", { name: "Close account" }).click();
-  await expect(page.getByText("Available balance").locator("..")) .toContainText("INR 1250.00");
-  await expect(page.getByText("Ledger balance").locator("..")) .toContainText("INR 1250.00");
+  await expect(page.getByRole("dialog").getByText("Available balance", { exact: true }).locator("..")) .toContainText("INR 1250.00");
+  await expect(page.getByRole("dialog").getByText("Ledger balance", { exact: true }).locator("..")) .toContainText("INR 1250.00");
   await expect(page.getByRole("button", { name: "Confirm close account" })).toBeDisabled();
   await page.getByRole("button", { name: "Cancel" }).click();
 });
@@ -185,8 +185,8 @@ test("funding fails closed when no different authorized INR source has positive 
   await page.unroute("**/api/me/accounts?*");
   await page.route("**/api/me/accounts?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ accounts: [zeroSource, zeroDestination], next_cursor: "" }) }));
   await page.goto(`/accounts/${sourceAccount.account_id}`);
-  await expect(page.getByRole("link", { name: "Fund account" })).toHaveCount(0);
-  await expect(page.getByText("No different active, authorized INR source has a positive available balance.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toHaveCount(0);
+  await expect(page.getByText("No other active, authorized INR account has a positive available balance for an incoming transfer.")).toBeVisible();
   await page.goto(`/transfers?destination=${sourceAccount.account_id}`);
   await expect(page.getByRole("heading", { name: "You need two eligible accounts" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Review transfer" })).toHaveCount(0);
@@ -204,21 +204,21 @@ test("account and transfer scopes independently govern create, lifecycle, and fu
   await expect(page.getByRole("link", { name: "Create account" })).toBeVisible();
   await page.goto(`/accounts/${sourceAccount.account_id}`);
   await expect(page.getByRole("button", { name: "Freeze account" })).toBeEnabled();
-  await expect(page.getByRole("link", { name: "Fund account" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toHaveCount(0);
 
   await useScopes(["accounts:read", "transfers:write"]);
   await page.goto("/accounts");
   await expect(page.getByRole("link", { name: "Create account" })).toHaveCount(0);
   await page.goto(`/accounts/${sourceAccount.account_id}`);
   await expect(page.getByRole("button", { name: "Freeze account" })).toBeDisabled();
-  await expect(page.getByRole("link", { name: "Fund account" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toBeVisible();
 
   await useScopes(["accounts:read"]);
   await page.goto("/accounts");
   await expect(page.getByRole("link", { name: "Create account" })).toHaveCount(0);
   await page.goto(`/accounts/${sourceAccount.account_id}`);
   await expect(page.getByRole("button", { name: "Freeze account" })).toBeDisabled();
-  await expect(page.getByRole("link", { name: "Fund account" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toHaveCount(0);
 });
 
 test("detail funding fails closed when the bounded authorized picker is incomplete", async ({ page }) => {
@@ -231,8 +231,8 @@ test("detail funding fails closed when the bounded authorized picker is incomple
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ accounts: [sourceAccount, destinationAccount], next_cursor: limit === "100" ? "more-authorized-accounts" : "" }) });
   });
   await page.goto(`/accounts/${sourceAccount.account_id}`);
-  await expect(page.getByText("The authorized account picker exceeds its bounded scope.")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Fund account" })).toHaveCount(0);
+  await expect(page.getByText("The account picker is incomplete. An incoming transfer remains unavailable until its source can be verified.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Transfer into account" })).toHaveCount(0);
   expect(requestedLimits).toContain("100");
   await page.goto("/accounts");
   await expect(page.getByRole("heading", { name: "Accounts", exact: true })).toBeVisible();
@@ -258,8 +258,8 @@ test("close dialog refreshes account configuration and both balances before enab
   await expect(page.getByText("Refreshing account details")).toBeHidden();
   expect(summaryReads).toBeGreaterThan(before.summaryReads);
   expect(balanceReads).toBeGreaterThan(before.balanceReads);
-  await expect(page.getByText("Available balance").locator("..")) .toContainText("INR 0.00");
-  await expect(page.getByText("Ledger balance").locator("..")) .toContainText("INR 0.00");
+  await expect(page.getByRole("dialog").getByText("Available balance", { exact: true }).locator("..")) .toContainText("INR 0.00");
+  await expect(page.getByRole("dialog").getByText("Ledger balance", { exact: true }).locator("..")) .toContainText("INR 0.00");
   await expect(page.getByText("Expected account version").last().locator("..")) .toContainText("11");
   await expect(page.getByRole("button", { name: "Confirm close account" })).toBeEnabled();
 });

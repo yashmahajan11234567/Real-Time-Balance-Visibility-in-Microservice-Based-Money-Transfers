@@ -35,6 +35,7 @@ type TransferHandler struct {
 	rateLimit         int
 	capacityLimit     int
 	audit             AuditRecorder
+	recovery          transfers.RecoveryRepository
 }
 
 type consistencyBalanceReader interface {
@@ -127,6 +128,10 @@ func (h *TransferHandler) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		writeScopeDenial(writer, request, h.audit, principal, "transfers:write")
 		return
 	}
+	h.submitAuthenticated(writer, request, principal)
+}
+
+func (h *TransferHandler) submitAuthenticated(writer http.ResponseWriter, request *http.Request, principal identity.Principal) {
 	if !enforceTenantCapacity(writer, request, h.rateLimiter, principal, "transfers:create", h.capacityLimit) {
 		return
 	}
@@ -151,20 +156,33 @@ func (h *TransferHandler) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	input.SourceAccountID, input.DestinationAccountID = sourceAccountID.String(), destinationAccountID.String()
-	submission, err := h.service.Submit(request.Context(), transfers.Command{
-		TenantID:        tenantID,
-		ActorSubjectID:  principal.SubjectID,
-		DebitAccountID:  sourceAccountID,
-		CreditAccountID: destinationAccountID,
-		Amount:          amount,
-		IdempotencyKey:  request.Header.Get("Idempotency-Key"),
-		CorrelationID:   middleware.CorrelationID(request.Context()),
-	})
+	command := transfers.Command{
+		TenantID:         tenantID,
+		ActorSubjectID:   principal.SubjectID,
+		DebitAccountID:   sourceAccountID,
+		CreditAccountID:  destinationAccountID,
+		Amount:           amount,
+		IdempotencyKey:   request.Header.Get("Idempotency-Key"),
+		RequestReference: request.Header.Get("X-LedgerSync-Request-Reference"),
+		CorrelationID:    middleware.CorrelationID(request.Context()),
+	}
+	if h.recovery != nil && command.RequestReference != "" {
+		if err := h.recovery.PrepareRecovery(request.Context(), command); err != nil {
+			httptransport.WriteError(writer, request, publicTransferError(err))
+			return
+		}
+	}
+	submission, err := h.service.Submit(request.Context(), command)
 	if err != nil {
 		httptransport.WriteError(writer, request, publicTransferError(err))
 		return
 	}
 	responseHeaders := make(http.Header)
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	if reference := strings.ToLower(strings.TrimSpace(request.Header.Get("X-LedgerSync-Request-Reference"))); reference != "" {
+		responseHeaders.Set("X-LedgerSync-Request-Reference", reference)
+	}
 	if submission.Replayed {
 		responseHeaders.Set("Idempotent-Replay", "true")
 	}
@@ -297,7 +315,7 @@ func publicTransferError(err error) error {
 	case errors.Is(err, db.ErrAccountInactive):
 		return &httptransport.PublicError{Status: http.StatusConflict, Code: "account_inactive", Message: "An account is not active for this transfer."}
 	case errors.Is(err, db.ErrInsufficientFunds):
-		return &httptransport.PublicError{Status: http.StatusConflict, Code: "insufficient_funds", Message: "The source account has insufficient posted balance."}
+		return &httptransport.PublicError{Status: http.StatusConflict, Code: "insufficient_funds", Message: "The source account has insufficient available funds."}
 	case errors.Is(err, db.ErrTransferBelowMinimum), errors.Is(err, db.ErrTransferAboveMaximum), errors.Is(err, db.ErrActorVelocityExceeded), errors.Is(err, db.ErrSourceVelocityExceeded), errors.Is(err, db.ErrTenantVelocityExceeded):
 		return &httptransport.PublicError{Status: http.StatusUnprocessableEntity, Code: "transfer_policy_denied", Message: "The transfer is outside the tenant's approved amount or rolling limits."}
 	case errors.Is(err, db.ErrTenantPolicyMissing), errors.Is(err, db.ErrUnsupportedPilotCurrency):

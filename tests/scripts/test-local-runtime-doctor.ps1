@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 . (Join-Path $repositoryRoot "scripts\local-runtime-common.ps1")
+. (Join-Path $repositoryRoot "scripts\local-backup-common.ps1")
 
 function Assert-LocalRuntimeDoctor {
     param([bool]$Condition, [string]$Message)
@@ -31,7 +32,11 @@ foreach ($privatePort in @("5432", "6379", "8080")) {
     $publishedPattern = '(?m)^\s*-?\s*["'']?0\.0\.0\.0:{0}' -f $privatePort
     Assert-LocalRuntimeDoctor ($composeSource -notmatch $publishedPattern) "Private port $privatePort was published."
 }
-Assert-LocalRuntimeDoctor (([regex]::Matches($composeSource, 'stop_grace_period:\s*30s')).Count -eq 5) "Long-running services do not share the graceful shutdown window."
+foreach ($serviceName in @('postgres', 'redis', 'api', 'outbox-worker', 'web', 'web-peer')) {
+    $servicePattern = '(?ms)^  {0}:\r?\n(?<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\z)' -f [regex]::Escape($serviceName)
+    $service = [regex]::Match($composeSource, $servicePattern)
+    Assert-LocalRuntimeDoctor ($service.Success -and $service.Groups['body'].Value -match '(?m)^    stop_grace_period:\s*30s\s*$') "Service $serviceName does not preserve the 30-second graceful shutdown window."
+}
 
 $seedSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "deploy\compose\demo-seed.sql") -Raw
 Assert-LocalRuntimeDoctor ($seedSource -match "local_demo_seed_metadata" -and $seedSource -match "persisted_version > 2") "Demo seed version compatibility is not fail-closed."
@@ -40,8 +45,20 @@ Assert-LocalRuntimeDoctor ($resetSource -match "Latest validated backup" -and $r
 $logsSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "scripts\logs-local.ps1") -Raw
 Assert-LocalRuntimeDoctor ($logsSource -match '"--timestamps"') "Bounded logs omit correlation-friendly timestamps."
 
+$policyRoleSQL = Get-LedgerSyncRestorePolicyRoleSQL
+foreach ($role in @('api','break_glass','maintenance','maintenance_owner','migration_owner','preflight_owner','provisioning','queue_owner','reconciliation','scheduler','support_readonly','worker')) {
+    Assert-LocalRuntimeDoctor ($policyRoleSQL.Contains("'ledgersync_$role'")) "Restore policy role identity is missing: $role"
+}
+Assert-LocalRuntimeDoctor ($policyRoleSQL.Contains('NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS')) "Restore policy roles lack inert attributes."
+Assert-LocalRuntimeDoctor ($policyRoleSQL -notmatch '(?im)^\s*(GRANT|CREATE\s+USER|ALTER\s+ROLE)\b') "Restore bootstrap installs unexpected privileges or login identities."
+$restoreSource = Get-Content -LiteralPath (Join-Path $repositoryRoot 'scripts/local-restore-drill.ps1') -Raw
+$bootstrapPosition = $restoreSource.IndexOf('Get-LedgerSyncRestorePolicyRoleSQL')
+$restorePosition = $restoreSource.IndexOf('"pg_restore"')
+Assert-LocalRuntimeDoctor ($bootstrapPosition -ge 0 -and $restorePosition -gt $bootstrapPosition) "Policy role identities must exist before pg_restore."
+
 Write-Output "LOCAL_RUNTIME_DOCTOR_TESTS=PASS"
 Write-Output "DOCKER_FAILURE_CLASSIFICATION=PASS"
 Write-Output "SERVICE_RECOVERY_GUIDANCE=PASS"
 Write-Output "LOOPBACK_AND_GRACEFUL_SHUTDOWN=PASS"
 Write-Output "SEED_AND_RESET_SAFETY=PASS"
+Write-Output "INERT_RESTORE_POLICY_ROLES=PASS"

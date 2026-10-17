@@ -11,9 +11,11 @@ import (
 
 	"github.com/painjanevivek/Real-Time-Balance-Visibility-in-Microservice-Based-Money-Transfers/internal/domain/identifier"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -26,12 +28,15 @@ const instrumentationName = "ledgersync/platform"
 type TelemetryConfig struct {
 	Enabled     bool
 	ServiceName string
-	Endpoint    string // private OTLP/HTTP host:port, for example otel-collector:4318
+	Endpoint    string // HTTPS authority in production; bare host:port remains local-only.
+	CAFile      string
 }
 
 type Telemetry struct {
-	enabled bool
-	tracer  trace.Tracer
+	enabled              bool
+	tracer               trace.Tracer
+	meter                metric.Meter
+	databaseLockDuration metric.Float64Histogram
 
 	requests                     metric.Int64Counter
 	boundaryCalls                metric.Int64Counter
@@ -72,21 +77,35 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 	if cfg.ServiceName == "" || cfg.Endpoint == "" {
 		return nil, errors.New("enabled telemetry requires service name and private OTLP endpoint")
 	}
-	traceExporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpoint(cfg.Endpoint), otlptracehttp.WithInsecure())
+	endpoint, tlsConfig, err := telemetryTransport(cfg.Endpoint, cfg.CAFile)
 	if err != nil {
 		return nil, err
 	}
-	metricExporter, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpoint(cfg.Endpoint), otlpmetrichttp.WithInsecure())
+	traceOptions := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpoint + "/v1/traces"), otlptracehttp.WithTimeout(time.Second), otlptracehttp.WithRetry(otlptracehttp.RetryConfig{Enabled: false})}
+	metricOptions := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(endpoint + "/v1/metrics"), otlpmetrichttp.WithTimeout(time.Second), otlpmetrichttp.WithRetry(otlpmetrichttp.RetryConfig{Enabled: false})}
+	if tlsConfig != nil {
+		traceOptions = append(traceOptions, otlptracehttp.WithTLSClientConfig(tlsConfig))
+		metricOptions = append(metricOptions, otlpmetrichttp.WithTLSClientConfig(tlsConfig))
+	}
+	traceExporter, err := otlptracehttp.New(ctx, traceOptions...)
 	if err != nil {
 		return nil, err
 	}
-	resources, err := resource.Merge(resource.Default(), resource.NewWithAttributes("", attribute.String("service.name", cfg.ServiceName)))
+	metricExporter, err := otlpmetrichttp.New(ctx, metricOptions...)
 	if err != nil {
 		return nil, err
 	}
-	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(traceExporter), sdktrace.WithResource(resources))
-	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)), sdkmetric.WithResource(resources))
+	// Do not import arbitrary OTEL_RESOURCE_ATTRIBUTES or host/user metadata.
+	resources := resource.NewSchemaless(attribute.String("service.name", cfg.ServiceName))
+	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(traceExporter, sdktrace.WithMaxQueueSize(512), sdktrace.WithMaxExportBatchSize(64), sdktrace.WithBatchTimeout(time.Second), sdktrace.WithExportTimeout(time.Second)), sdktrace.WithSampler(sdktrace.TraceIDRatioBased(0.1)), sdktrace.WithResource(resources))
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(15*time.Second), sdkmetric.WithTimeout(time.Second))), sdkmetric.WithResource(resources))
 	meter := meterProvider.Meter(instrumentationName)
+	telemetry.meter = meter
+	if err := telemetry.initializeDatabaseMetrics(); err != nil {
+		_ = meterProvider.Shutdown(ctx)
+		_ = tracerProvider.Shutdown(ctx)
+		return nil, err
+	}
 	requests, err := meter.Int64Counter("ledgersync.http.requests")
 	if err != nil {
 		return nil, err
@@ -231,24 +250,29 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 	if t == nil || t.shutdown == nil {
 		return nil
 	}
-	return t.shutdown(ctx)
+	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return t.shutdown(bounded)
 }
 
 func (t *Telemetry) Start(ctx context.Context, name string) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, trace.SpanFromContext(ctx)
+		return noop.NewTracerProvider().Tracer(instrumentationName).Start(ctx, name)
 	}
-	return t.tracer.Start(ctx, name)
+	return t.tracer.Start(context.WithValue(ctx, databaseObserverKey{}, t), name)
 }
 
 func (t *Telemetry) ObserveBoundary(ctx context.Context, boundary, operation string, started time.Time, err error) {
+	if err != nil {
+		// SQL and network errors can contain private identifiers, values or URLs.
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, "operation_failed")
+	}
 	if t == nil || !t.enabled {
 		return
 	}
 	outcome := "ok"
 	if err != nil {
 		outcome = "error"
-		trace.SpanFromContext(ctx).RecordError(err)
 	}
 	attrs := metric.WithAttributes(attribute.String("boundary", boundary), attribute.String("operation", operation), attribute.String("outcome", outcome))
 	t.boundaryCalls.Add(ctx, 1, attrs)
@@ -406,12 +430,20 @@ func (t *Telemetry) HTTP(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		ctx, span := t.Start(request.Context(), "http.server")
+		parent := TraceContextFromHeader(request.Header.Get("traceparent"))
+		incoming := request.Context()
+		if parent.IsValid() {
+			incoming = trace.ContextWithRemoteSpanContext(incoming, parent)
+		}
+		ctx, span := t.Start(incoming, "http.server")
 		defer span.End()
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
 		routedRequest := request.WithContext(ctx)
 		next.ServeHTTP(recorder, routedRequest)
+		if recorder.status >= 500 {
+			span.SetStatus(codes.Error, "request_failed")
+		}
 		if t.enabled {
 			durationMilliseconds := float64(time.Since(started)) / float64(time.Millisecond)
 			outcome := "ok"
@@ -426,6 +458,34 @@ func (t *Telemetry) HTTP(next http.Handler) http.Handler {
 			}
 		}
 	})
+}
+
+// Only the fixed W3C version-zero diagnostic header is accepted. Baggage and
+// tracestate are deliberately excluded. This context grants no authority.
+func TraceContextFromHeader(value string) trace.SpanContext {
+	if len(value) != 55 || value[:3] != "00-" {
+		return trace.SpanContext{}
+	}
+	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": value})
+	return trace.SpanContextFromContext(ctx).WithTraceState(trace.TraceState{})
+}
+
+func TraceParent(ctx context.Context) string {
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	return carrier.Get("traceparent")
+}
+
+// StartLinked starts a new attempt. It links to the origin without inheriting
+// its lifetime or trusting its sample flag. Business IDs are never attributes.
+func (t *Telemetry) StartLinked(ctx context.Context, name, parent string) (context.Context, trace.Span) {
+	if t == nil {
+		return noop.NewTracerProvider().Tracer(instrumentationName).Start(ctx, name)
+	}
+	if origin := TraceContextFromHeader(parent); origin.IsValid() {
+		return t.tracer.Start(ctx, name, trace.WithLinks(trace.Link{SpanContext: origin}))
+	}
+	return t.Start(ctx, name)
 }
 
 // performanceRouteOperation is deliberately a closed set. ServeMux patterns

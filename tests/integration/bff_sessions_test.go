@@ -21,7 +21,11 @@ func TestOpaqueSessionsAndPreferencesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("close session test database: %v", err)
+		}
+	})
 	database.SetMaxOpenConns(1)
 	tenant := uuid.NewString()
 	if _, err := database.ExecContext(ctx, `INSERT INTO tenants(id,external_reference) VALUES($1,$2)`, tenant, "session-smoke-"+tenant); err != nil {
