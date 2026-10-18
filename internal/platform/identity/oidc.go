@@ -79,7 +79,7 @@ func (p *OIDCProvider) Authenticate(ctx context.Context, credential string) (Pri
 
 func principalFromAccessTokenClaims(claims accessTokenClaims, resourceAudience string, clientTenants map[string]string) (Principal, error) {
 	claims.ClientID = strings.TrimSpace(claims.ClientID)
-	if claims.TokenUse != "access" || claims.ClientID == "" || !containsAudience(claims.Audience, resourceAudience) {
+	if claims.ClientID == "" || !containsAudience(claims.Audience, resourceAudience) {
 		return Principal{}, ErrUnauthenticated
 	}
 	tenantID := strings.TrimSpace(clientTenants[claims.ClientID])

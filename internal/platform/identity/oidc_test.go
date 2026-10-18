@@ -25,7 +25,6 @@ func TestAllowedSetDropsUnknownRolesAndScopes(t *testing.T) {
 func TestCognitoAccessTokenRequiresPurposeAudienceAndServerClientMapping(t *testing.T) {
 	valid := accessTokenClaims{
 		ClientID: "partner-client",
-		TokenUse: "access",
 		Audience: []string{"https://api.ledgersync.example"},
 		Scope:    "accounts:read accounts:write transfers:write reconciliation:write unknown:scope",
 	}
@@ -38,10 +37,10 @@ func TestCognitoAccessTokenRequiresPurposeAudienceAndServerClientMapping(t *test
 	}
 
 	for name, claims := range map[string]accessTokenClaims{
-		"id token":          {ClientID: valid.ClientID, TokenUse: "id", Audience: valid.Audience, Scope: valid.Scope},
-		"wrong audience":    {ClientID: valid.ClientID, TokenUse: valid.TokenUse, Audience: []string{"another-api"}, Scope: valid.Scope},
-		"unmapped client":   {ClientID: "unknown", TokenUse: valid.TokenUse, Audience: valid.Audience, Scope: valid.Scope},
-		"missing client id": {TokenUse: valid.TokenUse, Audience: valid.Audience, Scope: valid.Scope},
+		"wrong audience":   {ClientID: valid.ClientID, Audience: []string{"another-api"}, Scope: valid.Scope},
+		"unmapped client":  {ClientID: "unknown", Audience: valid.Audience, Scope: valid.Scope},
+		"missing client id": {Audience: valid.Audience, Scope: valid.Scope},
+		"id token as access token": {ClientID: valid.ClientID, Audience: []string{valid.ClientID}, Scope: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := principalFromAccessTokenClaims(claims, "https://api.ledgersync.example", map[string]string{"partner-client": "tenant-a"}); err == nil {

@@ -129,6 +129,7 @@ function configuration() {
   const issuer = process.env.LEDGERSYNC_OIDC_ISSUER_URL?.replace(/\/$/, "");
   const clientID = process.env.LEDGERSYNC_OIDC_CLIENT_ID;
   const redirectURI = process.env.LEDGERSYNC_OIDC_REDIRECT_URI;
+  const apiAudience = process.env.LEDGERSYNC_OIDC_API_AUDIENCE;
   if (!issuer || !clientID || !redirectURI)
     throw new Error(
       "OIDC issuer URL, client ID, and redirect URI are required",
@@ -142,6 +143,7 @@ function configuration() {
     issuer,
     clientID,
     redirectURI,
+    apiAudience,
     clientSecret: process.env.LEDGERSYNC_OIDC_CLIENT_SECRET,
   };
 }
@@ -237,7 +239,10 @@ export async function beginAuthorization(
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", config.clientID);
   url.searchParams.set("redirect_uri", config.redirectURI);
-  url.searchParams.set("scope", "openid profile");
+  if (config.apiAudience) {
+    url.searchParams.set("audience", config.apiAudience);
+  }
+  url.searchParams.set("scope", "openid profile bff:act-as-user");
   url.searchParams.set("state", transaction.state);
   url.searchParams.set("nonce", transaction.nonce);
   url.searchParams.set("code_challenge", challenge(transaction.codeVerifier));
@@ -302,10 +307,9 @@ export async function completeAuthorization(
   )
     throw new Error("OIDC signing algorithm is not allowed");
   if (
-    payload.nonce !== transaction.nonce ||
-    payload.token_use !== "id" ||
-    typeof payload.sub !== "string" ||
-    typeof payload.exp !== "number"
+  	payload.nonce !== transaction.nonce ||
+  	typeof payload.sub !== "string" ||
+  	typeof payload.exp !== "number"
   )
     throw new Error("OIDC identity claims are invalid");
   const authorization = resolveOperatorAuthorization(payload.sub);
