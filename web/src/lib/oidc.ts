@@ -127,6 +127,7 @@ export function resolveOperatorAuthorization(
 
 function configuration() {
   const issuer = process.env.LEDGERSYNC_OIDC_ISSUER_URL?.replace(/\/$/, "");
+  const issuerWithSlash = issuer + "/";
   const clientID = process.env.LEDGERSYNC_OIDC_CLIENT_ID;
   const redirectURI = process.env.LEDGERSYNC_OIDC_REDIRECT_URI;
   const apiAudience = process.env.LEDGERSYNC_OIDC_API_AUDIENCE;
@@ -141,6 +142,7 @@ function configuration() {
     throw new Error("production OIDC URLs must use HTTPS");
   return {
     issuer,
+    issuerWithSlash,
     clientID,
     redirectURI,
     apiAudience,
@@ -309,7 +311,7 @@ export async function completeAuthorization(
     timeoutDuration: 5_000,
   });
   const { payload, protectedHeader } = await jwtVerify(token.id_token, jwks, {
-    issuer: config.issuer,
+    issuer: config.issuerWithSlash,
     audience: config.clientID,
     algorithms: ["RS256", "ES256", "PS256"],
   });
