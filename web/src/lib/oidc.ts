@@ -213,8 +213,9 @@ async function discovery(): Promise<Discovery> {
   });
   if (!response.ok) throw new Error("OIDC discovery failed");
   const result = (await response.json()) as Partial<Discovery>;
+  const discoveryIssuer = (result.issuer ?? "").replace(/\/$/, "");
   if (
-    result.issuer !== issuer ||
+    discoveryIssuer !== issuer ||
     !result.authorization_endpoint ||
     !result.token_endpoint ||
     !result.jwks_uri

@@ -35,7 +35,11 @@ export async function GET(request: NextRequest) {
     const response = NextResponse.redirect(authorization.authorizationURL);
     response.cookies.set(transactionCookie(authorization.transactionCookie));
     return response;
-  } catch {
+  } catch (err) {
+    console.error(
+      "Sign-in error:",
+      err instanceof Error ? err.message : String(err),
+    );
     return jsonError("authentication_unavailable", 503);
   }
 }
