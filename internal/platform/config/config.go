@@ -242,11 +242,11 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("verified HTTPS telemetry authority is required outside development")
 		}
 	}
-	if config.Environment != "development" && (!config.TelemetryEnabled || config.OTLPHTTPEndpoint == "") {
-		return Config{}, fmt.Errorf("enabled telemetry and a private OTLP HTTP endpoint are required outside development")
+	if config.Environment != "development" && config.TelemetryEnabled && config.OTLPHTTPEndpoint == "" {
+		return Config{}, fmt.Errorf("OTLP HTTP endpoint is required when telemetry is enabled outside development")
 	}
-	if config.Environment != "development" && config.AWSRegion == "" {
-		return Config{}, fmt.Errorf("AWS_REGION is required outside development for managed webhook secrets")
+	if config.Environment != "development" && config.CronSecret != "" && config.AWSRegion == "" {
+		return Config{}, fmt.Errorf("AWS_REGION is required when cron is enabled for managed webhook secrets")
 	}
 	if config.Environment != "development" && len(config.WebhookSigningKeys) > 0 {
 		return Config{}, fmt.Errorf("LEDGERSYNC_WEBHOOK_SIGNING_KEYS_JSON is development-only; use AWS Secrets Manager outside development")
