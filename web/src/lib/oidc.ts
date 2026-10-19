@@ -260,13 +260,20 @@ export async function completeAuthorization(
   state: string,
   transactionCookie: string | undefined,
 ): Promise<CompletedAuthorization> {
+  function logStage(stage: string, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Callback stage ${stage}:`, message);
+  }
+
   const transaction = readTransaction(transactionCookie);
   if (
     !transaction ||
     state.length !== transaction.state.length ||
     !timingSafeEqual(Buffer.from(state), Buffer.from(transaction.state))
-  )
+  ) {
+    logStage("state_validation", new Error("OIDC state is invalid"));
     throw new Error("OIDC state is invalid");
+  }
   const config = configuration();
   const metadata = await discovery();
   const parameters = new URLSearchParams({
@@ -289,10 +296,15 @@ export async function completeAuthorization(
     cache: "no-store",
     signal: AbortSignal.timeout(5_000),
   });
-  if (!response.ok) throw new Error("OIDC code exchange failed");
+  if (!response.ok) {
+    logStage("token_exchange", new Error(`OIDC code exchange failed: ${response.status}`));
+    throw new Error("OIDC code exchange failed");
+  }
   const token = (await response.json()) as { id_token?: string };
-  if (!token.id_token)
+  if (!token.id_token) {
+    logStage("token_response", new Error("OIDC token response is missing id_token"));
     throw new Error("OIDC token response is missing id_token");
+  }
   const jwks = createRemoteJWKSet(new URL(metadata.jwks_uri), {
     timeoutDuration: 5_000,
   });
@@ -305,15 +317,25 @@ export async function completeAuthorization(
     protectedHeader.alg !== "RS256" &&
     protectedHeader.alg !== "ES256" &&
     protectedHeader.alg !== "PS256"
-  )
+  ) {
+    logStage("jwt_validation", new Error("OIDC signing algorithm is not allowed"));
     throw new Error("OIDC signing algorithm is not allowed");
+  }
   if (
-  	payload.nonce !== transaction.nonce ||
-  	typeof payload.sub !== "string" ||
-  	typeof payload.exp !== "number"
-  )
+    payload.nonce !== transaction.nonce ||
+    typeof payload.sub !== "string" ||
+    typeof payload.exp !== "number"
+  ) {
+    logStage("claims_validation", new Error("OIDC identity claims are invalid"));
     throw new Error("OIDC identity claims are invalid");
-  const authorization = resolveOperatorAuthorization(payload.sub);
+  }
+  let authorization: OperatorAuthorization;
+  try {
+    authorization = resolveOperatorAuthorization(payload.sub);
+  } catch (err) {
+    logStage("permission_mapping", err);
+    throw err;
+  }
   const authenticatedAt =
     typeof payload.auth_time === "number" && payload.auth_time > 0
       ? payload.auth_time * 1000

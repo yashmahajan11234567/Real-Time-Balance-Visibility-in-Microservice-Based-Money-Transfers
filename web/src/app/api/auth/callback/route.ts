@@ -26,7 +26,11 @@ export async function GET(request: NextRequest) {
     );
     response.cookies.set(expiredTransactionCookie());
     return response;
-  } catch {
+  } catch (err) {
+    console.error(
+      "Callback error:",
+      err instanceof Error ? err.message : String(err),
+    );
     return jsonError("authentication_failed", 401);
   }
 }
